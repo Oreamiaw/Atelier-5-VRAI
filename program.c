@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 
 #define WIDTH  60
@@ -107,9 +108,10 @@ static void apply_next_generation(int world[HEIGHT][WIDTH])
 }
 
 #define GENERATIONS    100   /* nombre de tours à simuler */
-#define PAUSE_EVERY     20   /* affichage + pause tous les 10 tours */
-#define START_MIN       100   /* nombre minimal de cellules vivantes au départ */
-#define START_MAX      150   /* nombre maximal de cellules vivantes au départ */
+#define PAUSE_EVERY     10   /* affichage + pause tous les 10 tours */
+#define CARNIVORE_END   80   /* génération à laquelle la partie s'arrête si le joueur répond oui */
+#define START_MIN       60   /* nombre minimal de cellules vivantes au départ */
+#define START_MAX      120   /* nombre maximal de cellules vivantes au départ */
 
 /* Départ aléatoire : entre START_MIN et START_MAX cellules vivantes (incluses),
  * placées à des positions aléatoires toutes différentes. Retourne leur nombre. */
@@ -126,6 +128,30 @@ static int init_world_random(void)
         }
     }
     return count;
+}
+
+/* Pose une question fermée et boucle jusqu'à une réponse "oui" ou "non".
+ * Retourne true pour oui, false pour non (ou si l'entrée est fermée). */
+static bool ask_yes_no(const char *question)
+{
+    char line[64];
+
+    for (;;) {
+        printf("%s (oui/non) : ", question);
+        fflush(stdout);
+        if (fgets(line, sizeof line, stdin) == NULL)
+            return false;                           /* fin de l'entrée : on considère non */
+
+        line[strcspn(line, "\r\n")] = '\0';
+        for (char *p = line; *p; p++)
+            *p = (char)tolower((unsigned char)*p);
+
+        if (strcmp(line, "oui") == 0 || strcmp(line, "o") == 0)
+            return true;
+        if (strcmp(line, "non") == 0 || strcmp(line, "n") == 0)
+            return false;
+        printf("Réponse non reconnue, répondez par oui ou non.\n");
+    }
 }
 
 /*
@@ -145,14 +171,27 @@ int main(int argc, char *argv[])
         printf("Graine : %u, %d cellules vivantes au départ\n\n", seed, alive);
     }
 
-    for (int g = 1; g <= GENERATIONS; g++) {
+    bool carnivore = false;         /* réponse du joueur à la première pause */
+    int  last_gen  = GENERATIONS;   /* dernière génération à simuler */
+
+    for (int g = 1; g <= last_gen; g++) {
         compute_next_generation(world);
         apply_next_generation(world);
-        if (g % PAUSE_EVERY == 0) {
+        if (g % PAUSE_EVERY == 0 || g == last_gen) {
             printf("Génération %d\n", g);
             display_world();
             putchar('\n');
-            if (g < GENERATIONS) {
+            if (g == PAUSE_EVERY) {
+                /* Première pause : question au joueur */
+                carnivore = ask_yes_no("Voulez vous mangez 2 moutons par jour = fin à 400 jours ? "
+                                       "(fin carnivore) Neutre");
+                printf("Réponse enregistrée : %s\n\n", carnivore ? "oui" : "non");
+                if (carnivore) {
+                    /* Fin carnivore : la partie s'arrête à la génération CARNIVORE_END */
+                    last_gen = CARNIVORE_END;
+                    printf("Fin carnivore : la partie s'arrêtera à la génération %d.\n\n", last_gen);
+                }
+            } else if (g < last_gen) {
                 printf("[Entrée pour continuer]");
                 fflush(stdout);
                 int c;
@@ -163,4 +202,4 @@ int main(int argc, char *argv[])
         }
     }
     return 0;
-}
+} 
