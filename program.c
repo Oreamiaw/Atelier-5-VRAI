@@ -107,7 +107,7 @@ static void apply_next_generation(int world[HEIGHT][WIDTH])
 }
 
 #define GENERATIONS    100   /* nombre de tours à simuler */
-#define DISPLAY_EVERY   50   /* affichage tous les 50 tours */
+#define PAUSE_EVERY     10   /* affichage + pause tous les 10 tours */
 #define DENSITY         25   /* % de cellules vivantes au départ */
 
 /* Départ aléatoire : chaque cellule est vivante avec une probabilité DENSITY % */
@@ -138,11 +138,20 @@ int main(int argc, char *argv[])
     for (int g = 1; g <= GENERATIONS; g++) {
         compute_next_generation(world);
         apply_next_generation(world);
-        if (g % DISPLAY_EVERY == 0) {
+        if (g % PAUSE_EVERY == 0) {
             printf("Génération %d\n", g);
             display_world();
             putchar('\n');
+            if (g < GENERATIONS) {
+                printf("[Entrée pour continuer]");
+                fflush(stdout);
+                int c;
+                while ((c = getchar()) != '\n' && c != EOF)
+                    ;                       /* attend la touche Entrée */
+                putchar('\n');
+            }
         }
     }
+    
     return 0;
 }
