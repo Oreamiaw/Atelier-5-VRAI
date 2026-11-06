@@ -104,17 +104,20 @@ static void apply_next_generation(int world[HEIGHT][WIDTH])
             world[y][x] = cell_next_state(world, x, y) ? 1 : 0;
 }
 
-int main(int argc, char *argv[])
-{
-    int generations = (argc > 1) ? atoi(argv[1]) : 4;
+#define GENERATIONS    100   /* nombre de tours à simuler */
+#define DISPLAY_EVERY   50   /* affichage tous les 50 tours */
 
+int main(void)
+{
     init_world();
-    for (int g = 0; g <= generations; g++) {
-        printf("Génération %d\n", g);
-        display_world();
-        putchar('\n');
+    for (int g = 1; g <= GENERATIONS; g++) {
         compute_next_generation(world);
         apply_next_generation(world);
+        if (g % DISPLAY_EVERY == 0) {
+            printf("Génération %d\n", g);
+            display_world();
+            putchar('\n');
+        }
     }
     return 0;
 }
