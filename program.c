@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #define WIDTH  60
 #define HEIGHT 20
@@ -106,10 +108,33 @@ static void apply_next_generation(int world[HEIGHT][WIDTH])
 
 #define GENERATIONS    100   /* nombre de tours à simuler */
 #define DISPLAY_EVERY   50   /* affichage tous les 50 tours */
+#define DENSITY         25   /* % de cellules vivantes au départ */
 
-int main(void)
+/* Départ aléatoire : chaque cellule est vivante avec une probabilité DENSITY % */
+static void init_world_random(void)
 {
-    init_world();
+    for (int y = 0; y < HEIGHT; y++)
+        for (int x = 0; x < WIDTH; x++)
+            world[y][x] = (rand() % 100 < DENSITY) ? 1 : 0;
+}
+
+/*
+ * ./life               : départ aléatoire, graine tirée de l'heure
+ * ./life <graine>      : départ aléatoire reproductible
+ * ./life --structures  : départ avec bloc, clignotant et planeur
+ */
+int main(int argc, char *argv[])
+{
+    if (argc > 1 && strcmp(argv[1], "--structures") == 0) {
+        init_world();
+    } else {
+        unsigned seed = (argc > 1) ? (unsigned)strtoul(argv[1], NULL, 10)
+                                   : (unsigned)time(NULL);
+        srand(seed);
+        printf("Graine : %u\n\n", seed);
+        init_world_random();
+    }
+
     for (int g = 1; g <= GENERATIONS; g++) {
         compute_next_generation(world);
         apply_next_generation(world);
