@@ -107,15 +107,25 @@ static void apply_next_generation(int world[HEIGHT][WIDTH])
 }
 
 #define GENERATIONS    100   /* nombre de tours à simuler */
-#define PAUSE_EVERY     10   /* affichage + pause tous les 10 tours */
-#define DENSITY         25   /* % de cellules vivantes au départ */
+#define PAUSE_EVERY     20   /* affichage + pause tous les 10 tours */
+#define START_MIN       100   /* nombre minimal de cellules vivantes au départ */
+#define START_MAX      150   /* nombre maximal de cellules vivantes au départ */
 
-/* Départ aléatoire : chaque cellule est vivante avec une probabilité DENSITY % */
-static void init_world_random(void)
+/* Départ aléatoire : entre START_MIN et START_MAX cellules vivantes (incluses),
+ * placées à des positions aléatoires toutes différentes. Retourne leur nombre. */
+static int init_world_random(void)
 {
-    for (int y = 0; y < HEIGHT; y++)
-        for (int x = 0; x < WIDTH; x++)
-            world[y][x] = (rand() % 100 < DENSITY) ? 1 : 0;
+    int count = START_MIN + rand() % (START_MAX - START_MIN + 1);
+
+    for (int placed = 0; placed < count; ) {
+        int x = rand() % WIDTH;
+        int y = rand() % HEIGHT;
+        if (!cell_cur_state(world, x, y)) {     /* évite de compter deux fois la même case */
+            world[y][x] = 1;
+            placed++;
+        }
+    }
+    return count;
 }
 
 /*
@@ -131,8 +141,8 @@ int main(int argc, char *argv[])
         unsigned seed = (argc > 1) ? (unsigned)strtoul(argv[1], NULL, 10)
                                    : (unsigned)time(NULL);
         srand(seed);
-        printf("Graine : %u\n\n", seed);
-        init_world_random();
+        int alive = init_world_random();
+        printf("Graine : %u, %d cellules vivantes au départ\n\n", seed, alive);
     }
 
     for (int g = 1; g <= GENERATIONS; g++) {
@@ -152,6 +162,5 @@ int main(int argc, char *argv[])
             }
         }
     }
-    
     return 0;
 }
