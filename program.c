@@ -1,373 +1,474 @@
 #include <stdio.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <stdbool.h>
 
-#define WIDTH  60
-#define HEIGHT 20
+/* ================================================================== */
+/*  CONSTANTES                                                         */
+/* ================================================================== */
 
-/* Tableau statique : HEIGHT lignes x WIDTH colonnes, initialisé à 0 (cellules mortes) */
-static int world[HEIGHT][WIDTH] = {0};
+/* Monde */
+#define WIDTH               60
+#define HEIGHT              20
+#define CELL_COUNT          (WIDTH * HEIGHT)
 
-/* Moutons invincibles (événement "aliens") : ils ne meurent jamais */
-static bool invincible[HEIGHT][WIDTH] = {{false}};
+/* Codage d'une cellule : unité = état actuel, dizaine = état futur */
+#define DEAD                0
+#define ALIVE               1
+#define STATE_BASE          10
 
-/*
- * Codage de l'état d'une cellule : dizaine = état futur, unité = état actuel
- *   0  : morte, le reste
- *   1  : vivante, va mourir
- *   10 : morte, va naître
- *   11 : vivante, le reste
- */
+/* Règles du jeu de la vie (voisinage de 1 case autour de la cellule) */
+#define NEIGHBOUR_RANGE     1
+#define SURVIVE_MIN         2
+#define SURVIVE_MAX         3
+#define BIRTH_MAX           3
+#define BIRTH_MIN_NORMAL    3   /* naissance normale : 3 voisines            */
+#define BIRTH_MIN_RADIO     2   /* herbe fluo : naissance dès 2 voisines     */
 
-/* Retourne true si la cellule (x, y) est vivante actuellement (unité == 1) */
-static bool cell_cur_state(int world[HEIGHT][WIDTH], int x, int y)
+/* Troupeau de départ */
+#define SHEEP_MIN           60
+#define SHEEP_MAX           120
+
+/* Durée de la partie (1 tour = 100 jours = 100 générations) */
+#define DAYS_PER_TURN       100
+#define SURVIVAL_DAYS       500
+#define CARNIVORE_END_DAY   400
+
+/* Effets des événements */
+#define EAT_NORMAL          1   /* moutons mangés par jour                   */
+#define EAT_CARNIVORE       2
+#define FORTIFIER_DIVISOR   4   /* le fortifiant tue un quart du troupeau    */
+#define EPIDEMIC_DIVISOR    3   /* l'abattage préventif tue un tiers         */
+#define EPIDEMIC_DEATHS     3   /* morts par jour si on laisse l'épidémie    */
+#define INVINCIBLE_DAYS     50  /* durée de l'effet du laser                 */
+
+/* Événements */
+#define EVENT_RADIO         0
+#define EVENT_FORTIFIER     1
+#define EVENT_CARNIVORE     2
+#define EVENT_ALIENS        3
+#define EVENT_EPIDEMIC      4
+#define NB_EVENTS           5
+#define QUESTION_LEN        400
+
+/* Entrées / sorties */
+#define ANSWER_LEN          16
+#define ANSWER_YES          "oui"
+#define ANSWER_NO           "non"
+#define CHAR_DEAD           '.'
+#define CHAR_SHEEP          '#'
+#define CHAR_PROTECTED      '@'
+#define ANSI_CLEAR          "\033[2J\033[3J\033[H"
+
+/* Textes des questions, dans l'ordre des numéros d'événements */
+static const char QUESTIONS[NB_EVENTS][QUESTION_LEN] = {
+    "Vous voyez une parcelle avec de l'herbe vert fluo, c'est peut-être radioactif, "
+    "ou peut-être juste EXTREMEMENT naturel. Autorisez-vous vos moutons à y prendre de l'herbe ?",
+
+    "Vous trouvez une caisse de bouteilles avec marqué fortifiant pour moutons, "
+    "voulez-vous leur en donner ?",
+
+    "Voulez-vous devenir carnivore et manger 2 moutons par jour ? "
+    "La partie se finira alors à 400 jours.",
+
+    "Des aliens arrivent et vous proposent de tester un laser miracle sur vos moutons. "
+    "Ils ont l'air louche mais vous sourient de façon joviale ^^. "
+    "Voulez-vous leur faire confiance et passer vos moutons au laser ?",
+
+    "Une épidémie touche une petite partie de vos moutons, voulez-vous tuer un tiers "
+    "du troupeau pour éviter qu'elle ne se développe ? "
+    "(3 moutons mourront chaque jour si vous ne le faites pas)"
+};
+
+/* ================================================================== */
+/*  ÉTAT DE LA PARTIE                                                  */
+/* ================================================================== */
+
+static int  world[HEIGHT][WIDTH];
+static int  day;                    /* jours écoulés                          */
+static int  end_day;                /* jour de la fin de partie               */
+static int  eat_per_day;            /* moutons mangés par jour                */
+static int  birth_min;              /* voisines nécessaires pour une naissance*/
+static int  invincible_days;        /* jours restants d'invincibilité         */
+static bool epidemic_active;        /* l'épidémie tue chaque jour             */
+static bool event_used[NB_EVENTS];  /* un événement n'apparaît qu'une fois    */
+static char answer[ANSWER_LEN];     /* dernière ligne saisie par le joueur    */
+
+/* ================================================================== */
+/*  LOGIQUE DU JEU (aucun affichage, aucune saisie)                    */
+/* ================================================================== */
+
+static bool cell_cur_state(int x, int y)
 {
-    return world[y][x] % 10 == 1;
+    return world[y][x] % STATE_BASE == ALIVE;
 }
 
-/* Retourne true si la cellule (x, y) sera vivante à la génération suivante (dizaine == 1) */
-static bool cell_next_state(int world[HEIGHT][WIDTH], int x, int y)
+static bool cell_next_state(int x, int y)
 {
-    return world[y][x] / 10 == 1;
+    return world[y][x] / STATE_BASE == ALIVE;
 }
 
-/* Place un motif (tableau de coordonnées relatives) à la position (x, y) */
-static void place(const int pattern[][2], int n, int x, int y)
+static int count_sheep(void)
 {
-    for (int i = 0; i < n; i++)
-        world[y + pattern[i][1]][x + pattern[i][0]] = 1;
-}
+    int count = 0;
 
-static void init_world(void)
-{
-    /* Structure stable : bloc 2x2 */
-    const int block[][2] = { {0,0}, {1,0}, {0,1}, {1,1} };
-
-    /* Oscillateur : clignotant (blinker), période 2 */
-    const int blinker[][2] = { {0,0}, {1,0}, {2,0} };
-
-    /* Vaisseau : planeur (glider) */
-    const int glider[][2] = { {1,0}, {2,1}, {0,2}, {1,2}, {2,2} };
-
-    place(block,   4, 10, 10);
-    place(blinker, 3, 30, 10);
-    place(glider,  5, 50, 10);
-}
-
-static void display_world(void)
-{
-    for (int y = 0; y < HEIGHT; y++) {
+    for (int y = 0; y < HEIGHT; y++)
         for (int x = 0; x < WIDTH; x++)
-            putchar(!cell_cur_state(world, x, y) ? '.'
-                    : invincible[y][x]           ? '@' : '#');
-        putchar('\n');
-    }
+            if (cell_cur_state(x, y))
+                count++;
+    return count;
 }
 
-/* Nombre de voisines vivantes (état ACTUEL) de (x, y) : monde torique,
- * les bords sont recollés (la colonne WIDTH-1 touche la colonne 0, etc.) */
-static int count_neighbours(int world[HEIGHT][WIDTH], int x, int y)
+/* Voisines vivantes de (x, y) : monde torique */
+static int count_neighbours(int x, int y)
 {
-    int n = 0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
+    int count = 0;
+
+    for (int dy = -NEIGHBOUR_RANGE; dy <= NEIGHBOUR_RANGE; dy++) {
+        for (int dx = -NEIGHBOUR_RANGE; dx <= NEIGHBOUR_RANGE; dx++) {
             if (dx == 0 && dy == 0)
-                continue;                       /* on ne se compte pas soi-même */
-            int nx = (x + dx + WIDTH)  % WIDTH;
-            int ny = (y + dy + HEIGHT) % HEIGHT;
-            if (cell_cur_state(world, nx, ny))
-                n++;
+                continue;
+            if (cell_cur_state((x + dx + WIDTH) % WIDTH, (y + dy + HEIGHT) % HEIGHT))
+                count++;
         }
     }
-    return n;
+    return count;
 }
 
-/* Définit l'état futur (dizaine) de (x, y) selon l'état actuel de ses voisines */
-static void cell_compute_next_state(int world[HEIGHT][WIDTH], int x, int y)
+/* Phase 1 pour une cellule : calcul de l'état futur (dizaine) */
+static void cell_compute_next_state(int x, int y)
 {
-    int  n    = count_neighbours(world, x, y);
-    bool next = cell_cur_state(world, x, y) ? (n == 2 || n == 3)   /* survie */
-                                            : (n == 3);            /* naissance */
+    int  neighbours = count_neighbours(x, y);
+    bool alive      = cell_cur_state(x, y);
+    bool next;
 
-    if (invincible[y][x] && cell_cur_state(world, x, y))
-        next = true;                                               /* invincible : ne meurt jamais */
+    if (alive)
+        next = (neighbours >= SURVIVE_MIN && neighbours <= SURVIVE_MAX);
+    else
+        next = (neighbours >= birth_min && neighbours <= BIRTH_MAX);
 
-    world[y][x] = world[y][x] % 10 + (next ? 10 : 0);
+    if (alive && invincible_days > 0)
+        next = true;                    /* sous le laser, rien ne meurt */
+
+    world[y][x] = world[y][x] % STATE_BASE + (next ? STATE_BASE : DEAD);
 }
 
 /* Phase 1 : calcul de l'état futur de toutes les cellules */
-static void compute_next_generation(int world[HEIGHT][WIDTH])
+static void compute_next_generation(void)
 {
     for (int y = 0; y < HEIGHT; y++)
         for (int x = 0; x < WIDTH; x++)
-            cell_compute_next_state(world, x, y);
+            cell_compute_next_state(x, y);
 }
 
-/* Phase 2 : le futur devient l'actuel (la dizaine passe à l'unité) */
-static void apply_next_generation(int world[HEIGHT][WIDTH])
+/* Phase 2 : le futur devient l'actuel */
+static void apply_next_generation(void)
 {
     for (int y = 0; y < HEIGHT; y++)
         for (int x = 0; x < WIDTH; x++)
-            world[y][x] = cell_next_state(world, x, y) ? 1 : 0;
+            world[y][x] = cell_next_state(x, y) ? ALIVE : DEAD;
 }
 
-#define GENERATIONS    100   /* nombre de tours à simuler */
-#define PAUSE_EVERY     10   /* affichage + pause tous les 10 tours */
-#define CARNIVORE_END   40   /* génération à laquelle la partie s'arrête (fin carnivore, 40 jours) */
-#define VODKA_DIVISOR    4   /* la vodka tue un quart de la colonie */
-#define CANNABIS_FLYERS 50   /* nombre de moutons qui s'envolent après le cannabis */
-#define RADIO_BIRTHS     2   /* nombre de nouvelles cases par mouton dans la parcelle radioactive */
-#define START_MIN       60   /* nombre minimal de cellules vivantes au départ */
-#define START_MAX      120   /* nombre maximal de cellules vivantes au départ */
-
-/* Départ aléatoire : entre START_MIN et START_MAX cellules vivantes (incluses),
- * placées à des positions aléatoires toutes différentes. Retourne leur nombre. */
-static int init_world_random(void)
+/* Tue n moutons choisis au hasard (aucun si invincibles). Retourne le nombre de morts. */
+static int kill_random_sheep(int n)
 {
-    int count = START_MIN + rand() % (START_MAX - START_MIN + 1);
+    int cells[CELL_COUNT];
+    int count = 0;
+
+    if (invincible_days > 0)
+        return 0;
+
+    for (int y = 0; y < HEIGHT; y++)
+        for (int x = 0; x < WIDTH; x++)
+            if (cell_cur_state(x, y))
+                cells[count++] = y * WIDTH + x;
+
+    for (int i = count - 1; i > 0; i--) {           /* mélange de Fisher-Yates */
+        int j   = rand() % (i + 1);
+        int tmp = cells[i];
+        cells[i] = cells[j];
+        cells[j] = tmp;
+    }
+
+    if (n > count)
+        n = count;
+    for (int i = 0; i < n; i++)
+        world[cells[i] / WIDTH][cells[i] % WIDTH] = DEAD;
+    return n;
+}
+
+/* Remet la partie à zéro */
+static void reset_game(void)
+{
+    memset(world, DEAD, sizeof world);
+    memset(event_used, false, sizeof event_used);
+    day             = 0;
+    end_day         = SURVIVAL_DAYS;
+    eat_per_day     = EAT_NORMAL;
+    birth_min       = BIRTH_MIN_NORMAL;
+    invincible_days = 0;
+    epidemic_active = false;
+}
+
+/* Place un troupeau de taille aléatoire à des positions toutes différentes */
+static int place_start_sheep(void)
+{
+    int count = SHEEP_MIN + rand() % (SHEEP_MAX - SHEEP_MIN + 1);
 
     for (int placed = 0; placed < count; ) {
         int x = rand() % WIDTH;
         int y = rand() % HEIGHT;
-        if (!cell_cur_state(world, x, y)) {     /* évite de compter deux fois la même case */
-            world[y][x] = 1;
+        if (!cell_cur_state(x, y)) {
+            world[y][x] = ALIVE;
             placed++;
         }
     }
     return count;
 }
 
-/* Pose une question fermée et boucle jusqu'à une réponse "oui" ou "non".
- * Retourne true pour oui, false pour non (ou si l'entrée est fermée). */
-static bool ask_yes_no(const char *question)
+/* Tire au hasard un événement pas encore apparu dans cette partie */
+static int pick_event(void)
 {
-    char line[64];
+    int remaining = 0;
+    int target;
 
-    for (;;) {
-        printf("%s (oui/non) : ", question);
-        fflush(stdout);
-        if (fgets(line, sizeof line, stdin) == NULL)
-            return false;                           /* fin de l'entrée : on considère non */
+    for (int e = 0; e < NB_EVENTS; e++)
+        if (!event_used[e])
+            remaining++;
 
-        line[strcspn(line, "\r\n")] = '\0';
-        for (char *p = line; *p; p++)
-            *p = (char)tolower((unsigned char)*p);
-
-        if (strcmp(line, "oui") == 0 || strcmp(line, "o") == 0)
-            return true;
-        if (strcmp(line, "non") == 0 || strcmp(line, "n") == 0)
-            return false;
-        printf("Réponse non reconnue, répondez par oui ou non.\n");
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* Moutons = cellules vivantes                                          */
-/* ------------------------------------------------------------------ */
-
-static int count_sheep(void)
-{
-    int n = 0;
-    for (int y = 0; y < HEIGHT; y++)
-        for (int x = 0; x < WIDTH; x++)
-            if (cell_cur_state(world, x, y))
-                n++;
-    return n;
-}
-
-/* Tue jusqu'à n moutons NON invincibles. Si random est faux, ce sont les premiers
- * dans l'ordre de lecture du monde ; sinon ils sont tirés au hasard.
- * Retourne le nombre de moutons morts. */
-static int kill_sheep(int n, bool random)
-{
-    int cells[WIDTH * HEIGHT];
-    int count = 0;
-
-    for (int y = 0; y < HEIGHT; y++)
-        for (int x = 0; x < WIDTH; x++)
-            if (cell_cur_state(world, x, y) && !invincible[y][x])
-                cells[count++] = y * WIDTH + x;
-
-    if (random) {                                   /* mélange de Fisher-Yates */
-        for (int i = count - 1; i > 0; i--) {
-            int j = rand() % (i + 1);
-            int tmp = cells[i]; cells[i] = cells[j]; cells[j] = tmp;
+    target = rand() % remaining;
+    for (int e = 0; e < NB_EVENTS; e++) {
+        if (event_used[e])
+            continue;
+        if (target == 0) {
+            event_used[e] = true;
+            return e;
         }
+        target--;
     }
-
-    if (n > count)
-        n = count;
-    for (int i = 0; i < n; i++)
-        world[cells[i] / WIDTH][cells[i] % WIDTH] = 0;
-    return n;
+    return 0;                           /* inatteignable si remaining > 0 */
 }
 
-/* Parcelle radioactive : chaque mouton fait naître RADIO_BIRTHS moutons sur des
- * cases mortes voisines. Les voisines sont lues AVANT toute naissance (pas de
- * réaction en chaîne). Retourne le nombre de naissances. */
-static int radioactive_births(void)
+/* Applique la réponse du joueur. Retourne un nombre utile à l'affichage :
+ * moutons morts (fortifiant, épidémie) ou jour de fin de partie (carnivore). */
+static int apply_event(int event, bool accepted)
 {
-    static bool born[HEIGHT][WIDTH];
-    int total = 0;
-
-    memset(born, 0, sizeof born);
-    for (int y = 0; y < HEIGHT; y++) {
-        for (int x = 0; x < WIDTH; x++) {
-            if (!cell_cur_state(world, x, y))
-                continue;
-
-            int free_cells[8][2], nfree = 0;
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    int nx = (x + dx + WIDTH)  % WIDTH;
-                    int ny = (y + dy + HEIGHT) % HEIGHT;
-                    if ((dx || dy) && !cell_cur_state(world, nx, ny) && !born[ny][nx]) {
-                        free_cells[nfree][0] = nx;
-                        free_cells[nfree][1] = ny;
-                        nfree++;
-                    }
-                }
-            }
-            for (int k = 0; k < RADIO_BIRTHS && nfree > 0; k++) {
-                int r = rand() % nfree;
-                born[free_cells[r][1]][free_cells[r][0]] = true;
-                free_cells[r][0] = free_cells[nfree - 1][0];
-                free_cells[r][1] = free_cells[nfree - 1][1];
-                nfree--;
-                total++;
-            }
-        }
-    }
-
-    for (int y = 0; y < HEIGHT; y++)
-        for (int x = 0; x < WIDTH; x++)
-            if (born[y][x])
-                world[y][x] = 1;
-    return total;
-}
-
-/* Laser des aliens : tous les moutons actuels deviennent invincibles */
-static int make_invincible(void)
-{
-    int n = 0;
-    for (int y = 0; y < HEIGHT; y++)
-        for (int x = 0; x < WIDTH; x++)
-            if (cell_cur_state(world, x, y)) {
-                invincible[y][x] = true;
-                n++;
-            }
-    return n;
-}
-
-/* ------------------------------------------------------------------ */
-/* Événements : un par pause, dans l'ordre de la liste, puis on recommence */
-/* ------------------------------------------------------------------ */
-
-#define NB_EVENTS 5
-
-static const char *const event_questions[NB_EVENTS] = {
-    "Voulez vous mangez 2 moutons par jour = fin à 40 jours ? (fin carnivore) Neutre",
-    "Voulez-vous mettre les moutons dans la parcelle radioactive ?",
-    "Vous trouvez une caisse de vodka, voulez-vous en donner à vos moutons "
-        "pour qu'ils deviennent plus résistants ?",
-    "Des aliens arrivent et veulent tester un laser sur vos moutons. Acceptez-vous ?",
-    "Vous trouvez un champ de cannabis, voulez-vous faire fumer les moutons ?",
-};
-
-/* Applique l'effet de l'événement accepté. Retourne true si le monde a changé.
- * *last_gen est la dernière génération à simuler (la fin carnivore la raccourcit). */
-static bool apply_event(int event, int g, int *last_gen)
-{
-    int n;
-
     switch (event) {
-    case 0:     /* Neutre : fin carnivore */
-        *last_gen = (CARNIVORE_END > g) ? CARNIVORE_END : g;
-        printf("Fin carnivore : la partie s'arrêtera à la génération %d.\n", *last_gen);
-        return false;
-    case 1:     /* Positif : reproduction */
-        n = radioactive_births();
-        printf("La radioactivité fait son effet : %d nouveaux moutons naissent à côté des autres.\n", n);
-        return true;
-    case 2:     /* Négatif : un quart de la colonie meurt (les premiers dans le monde) */
-        n = count_sheep() / VODKA_DIVISOR;
-        if (n == 0 && count_sheep() > 0)
-            n = 1;
-        n = kill_sheep(n, false);
-        printf("La vodka était trop forte : %d moutons meurent.\n", n);
-        return true;
-    case 3:     /* Positif : invincibles */
-        n = make_invincible();
-        printf("Le laser rend vos %d moutons invincibles (affichés par @).\n", n);
-        return true;
-    default:    /* Négatif : les moutons s'envolent */
-        n = kill_sheep(CANNABIS_FLYERS, true);
-        printf("%d moutons se sentent pousser des ailes et s'envolent vers les cieux.\n", n);
-        return true;
+    case EVENT_RADIO:
+        if (accepted)
+            birth_min = BIRTH_MIN_RADIO;
+        return 0;
+    case EVENT_FORTIFIER:
+        return accepted ? kill_random_sheep(count_sheep() / FORTIFIER_DIVISOR) : 0;
+    case EVENT_CARNIVORE:
+        if (accepted) {
+            eat_per_day = EAT_CARNIVORE;
+            end_day = (day + DAYS_PER_TURN > CARNIVORE_END_DAY) ? day + DAYS_PER_TURN
+                                                                  : CARNIVORE_END_DAY;
+        }
+        return end_day;
+    case EVENT_ALIENS:
+        if (accepted)
+            invincible_days = INVINCIBLE_DAYS;
+        return 0;
+    default:                            /* EVENT_EPIDEMIC */
+        if (accepted)
+            return kill_random_sheep(count_sheep() / EPIDEMIC_DIVISOR);
+        epidemic_active = true;
+        return 0;
     }
 }
 
-/* Teste la fin de partie : plus aucun mouton */
-static bool all_sheep_dead(void)
+/* Un jour : une génération du jeu de la vie, puis le repas et l'épidémie */
+static void simulate_day(void)
 {
-    if (count_sheep() > 0)
+    compute_next_generation();
+    apply_next_generation();
+
+    kill_random_sheep(eat_per_day);
+    if (epidemic_active)
+        kill_random_sheep(EPIDEMIC_DEATHS);
+
+    if (invincible_days > 0)
+        invincible_days--;
+    day++;
+}
+
+/* ================================================================== */
+/*  ENTRÉES / SORTIES                                                  */
+/* ================================================================== */
+
+static void clear_screen(void)
+{
+    printf(ANSI_CLEAR);
+    fflush(stdout);
+}
+
+/* Lit une ligne dans answer (en minuscules). Retourne false si l'entrée est fermée. */
+static bool read_line(void)
+{
+    int c = getchar();
+    int len = 0;
+
+    if (c == EOF)
         return false;
-    printf("fin de partie, tout vos moutons sont morts\n");
+    while (c != '\n' && c != EOF) {
+        if (len < ANSWER_LEN - 1)
+            answer[len++] = (char)tolower(c);
+        c = getchar();
+    }
+    answer[len] = '\0';
     return true;
 }
 
-/*
- * ./life               : départ aléatoire, graine tirée de l'heure
- * ./life <graine>      : départ aléatoire reproductible
- * ./life --structures  : départ avec bloc, clignotant et planeur
- */
-int main(int argc, char *argv[])
+static void wait_enter(void)
 {
-    if (argc > 1 && strcmp(argv[1], "--structures") == 0) {
-        init_world();
-    } else {
-        unsigned seed = (argc > 1) ? (unsigned)strtoul(argv[1], NULL, 10)
-                                   : (unsigned)time(NULL);
-        srand(seed);
-        int alive = init_world_random();
-        printf("Graine : %u, %d cellules vivantes au départ\n\n", seed, alive);
+    printf("[Entrée pour continuer]");
+    fflush(stdout);
+    read_line();
+}
+
+/* Pose oui/non jusqu'à une réponse valide. Une entrée fermée vaut non. */
+static bool ask_yes_no(void)
+{
+    for (;;) {
+        printf("(%s/%s) : ", ANSWER_YES, ANSWER_NO);
+        fflush(stdout);
+        if (!read_line())
+            return false;
+        if (strcmp(answer, ANSWER_YES) == 0)
+            return true;
+        if (strcmp(answer, ANSWER_NO) == 0)
+            return false;
+        printf("Réponse non reconnue, répondez par %s ou %s.\n", ANSWER_YES, ANSWER_NO);
+    }
+}
+
+static void show_intro(int sheep)
+{
+    printf("Bonjour berger, vous venez avec votre troupeau de %d moutons de survivre "
+           "à l'apocalypse, vous devez survivre %d jours afin d'obtenir une colonie stable. "
+           "Vous mangez %d mouton par jour, alors si vous n'en n'avez plus, vous mourrez. "
+           "Bonne chance !\n\n", sheep, SURVIVAL_DAYS, EAT_NORMAL);
+}
+
+static void show_world(void)
+{
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            if (!cell_cur_state(x, y))
+                putchar(CHAR_DEAD);
+            else
+                putchar(invincible_days > 0 ? CHAR_PROTECTED : CHAR_SHEEP);
+        }
+        putchar('\n');
+    }
+}
+
+static void show_status(void)
+{
+    printf("Jour %d / %d - Moutons : %d - Vous mangez %d mouton(s) par jour\n\n",
+           day, end_day, count_sheep(), eat_per_day);
+    show_world();
+    putchar('\n');
+}
+
+static void show_event_result(int event, bool accepted, int value)
+{
+    if (!accepted && event != EVENT_EPIDEMIC) {
+        printf("Vous refusez : il ne se passe rien.\n\n");
+        return;
+    }
+    switch (event) {
+    case EVENT_RADIO:
+        printf("Vos moutons broutent l'herbe fluo : ce tour-ci, ils se reproduisent "
+               "dès %d voisins.\n\n", BIRTH_MIN_RADIO);
+        break;
+    case EVENT_FORTIFIER:
+        printf("Le fortifiant était bien trop fort : %d moutons meurent.\n\n", value);
+        break;
+    case EVENT_CARNIVORE:
+        printf("Vous devenez carnivore : %d moutons par jour, la partie finira au jour %d.\n\n",
+               EAT_CARNIVORE, value);
+        break;
+    case EVENT_ALIENS:
+        printf("Le laser fonctionne : vos moutons ne peuvent plus mourir pendant %d jours.\n\n",
+               INVINCIBLE_DAYS);
+        break;
+    default:
+        if (accepted)
+            printf("Vous abattez un tiers du troupeau : %d moutons meurent.\n\n", value);
+        else
+            printf("L'épidémie se propage : %d moutons mourront chaque jour jusqu'à la fin.\n\n",
+                   EPIDEMIC_DEATHS);
+        break;
+    }
+}
+
+static void show_defeat(void)
+{
+    printf("fin de partie, tout vos moutons sont morts\n");
+}
+
+static void show_victory(void)
+{
+    printf("bravo, vous avez survécus\n");
+}
+
+/* ================================================================== */
+/*  DÉROULEMENT D'UNE PARTIE                                           */
+/* ================================================================== */
+
+/* Retourne true si le joueur survit jusqu'à la fin de la partie */
+static bool play_game(void)
+{
+    reset_game();
+    int start = place_start_sheep();
+
+    clear_screen();
+    show_intro(start);
+    wait_enter();
+
+    while (day < end_day) {
+        birth_min = BIRTH_MIN_NORMAL;           /* l'herbe fluo ne dure qu'un tour */
+
+        int event = pick_event();
+        clear_screen();
+        show_status();
+        printf("%s\n", QUESTIONS[event]);
+
+        bool accepted = ask_yes_no();
+        int  value    = apply_event(event, accepted);
+        show_event_result(event, accepted, value);
+
+        if (count_sheep() == 0) {
+            show_defeat();
+            return false;
+        }
+        wait_enter();
+
+        for (int d = 0; d < DAYS_PER_TURN && day < end_day && count_sheep() > 0; d++)
+            simulate_day();
+
+        if (count_sheep() == 0) {
+            clear_screen();
+            show_status();
+            show_defeat();
+            return false;
+        }
     }
 
-    int last_gen = GENERATIONS;     /* dernière génération à simuler */
+    clear_screen();
+    show_status();
+    show_victory();
+    return true;
+}
 
-    for (int g = 1; g <= last_gen; g++) {
-        compute_next_generation(world);
-        apply_next_generation(world);
-
-        bool pause = (g % PAUSE_EVERY == 0);
-        if (pause || g == last_gen || count_sheep() == 0) {
-            printf("Génération %d\n", g);
-            display_world();
-            printf("Moutons : %d\n\n", count_sheep());
-        }
-        if (all_sheep_dead())
-            return 0;
-
-        if (pause && g < last_gen) {
-            /* À chaque pause : un événement, le joueur répond oui ou non */
-            int event = (g / PAUSE_EVERY - 1) % NB_EVENTS;
-            if (ask_yes_no(event_questions[event])) {
-                bool changed = apply_event(event, g, &last_gen);
-                if (changed) {
-                    putchar('\n');
-                    display_world();
-                    printf("Moutons : %d\n", count_sheep());
-                }
-                if (all_sheep_dead())
-                    return 0;
-            } else {
-                printf("Vous refusez : il ne se passe rien.\n");
-            }
-            putchar('\n');
-        }
-    }
+int main(void)
+{
+    srand((unsigned)time(NULL));
+    play_game();
     return 0;
 }
