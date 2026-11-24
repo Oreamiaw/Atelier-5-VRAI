@@ -409,12 +409,12 @@ static void show_event_result(int event, bool accepted, int value)
 
 static void show_defeat(void)
 {
-    printf("fin de partie, tout vos moutons sont morts\n");
+    printf("Partie perdue, vous n'avez plus de moutons, vous êtes mort\n");
 }
 
 static void show_victory(void)
 {
-    printf("bravo, vous avez survécus\n");
+    printf("Bravo, vous avez gagné, votre troupeau est devenu prospère.\n");
 }
 
 /* ================================================================== */
@@ -466,9 +466,20 @@ static bool play_game(void)
     return true;
 }
 
+static void show_replay_question(void)
+{
+    printf("\nVoulez-vous relancer une partie ? ");
+}
+
 int main(void)
 {
+    bool replay;
+
     srand((unsigned)time(NULL));
-    play_game();
+    do {
+        play_game();
+        show_replay_question();
+        replay = ask_yes_no();
+    } while (replay);
     return 0;
 }
